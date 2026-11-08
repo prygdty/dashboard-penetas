@@ -6,7 +6,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Responsi
 
 // ================= KONFIGURASI FIREBASE =================
 const firebaseConfig = {
-  databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL || "https://penetas-telur-8156f-default-rtdb.asia-southeast1.firebasedatabase.app",
+  databaseURL: "https://penetas-telur-8156f-default-rtdb.asia-southeast1.firebasedatabase.app"
 };
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
