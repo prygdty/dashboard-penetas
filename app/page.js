@@ -1,261 +1,413 @@
 "use client";
+import { useEffect, useState, useRef } from "react";
+import { initializeApp, getApps, getApp } from "firebase/app";
+import { getDatabase, ref, onValue, set } from "firebase/database";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
-import { useEffect, useState } from "react";
-import { ref, onValue, set, query, limitToLast } from "firebase/database";
-import { database } from "../lib/firebase";
-
-// Komponen Indikator Bulat Presisi dengan Tema Bersih
-const CircularGauge = ({ value, min, max, label, color, bgColor, unit }) => {
-  const radius = 38;
-  const circumference = 2 * Math.PI * radius;
-  const percent = Math.min(Math.max((value - min) / (max - min), 0), 1);
-  const offset = circumference - percent * circumference;
-
-  return (
-    <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col items-center justify-center text-center">
-      <div className="relative w-24 h-24 flex items-center justify-center mb-3">
-        <svg className="w-full h-full transform -rotate-90">
-          <circle cx="48" cy="48" r={radius} stroke="#f1f5f9" strokeWidth="8" fill="transparent" />
-          <circle cx="48" cy="48" r={radius} stroke={color} strokeWidth="8" fill="transparent" strokeDasharray={circumference} strokeDashoffset={offset} strokeLinecap="round" className="transition-all duration-700 ease-out" />
-        </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className="text-2xl font-black text-slate-800">{value}</span>
-          <span className="text-[10px] font-bold text-slate-400 uppercase">{unit}</span>
-        </div>
-      </div>
-      <p className="text-xs font-bold text-slate-600 uppercase tracking-wider">{label}</p>
-      <span className="mt-2 text-[10px] font-bold bg-slate-50 text-slate-400 border border-slate-100 px-2 py-1 rounded-md">Real-time</span>
-    </div>
-  );
+// ================= KONFIGURASI FIREBASE =================
+const firebaseConfig = {
+  databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL || "https://penetas-telur-8156f-default-rtdb.asia-southeast1.firebasedatabase.app",
 };
 
-export default function DashboardPintar() {
-  const [dataTetas, setDataTetas] = useState({
-    suhu: 0, kelembapan: 0, hari: 0, putaran: 0, status_lampu: 0, status_motor: 0,
+const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+const db = getDatabase(app);
+
+export default function Dashboard() {
+  // --- STATE MANAGEMENT ---
+  const [data, setData] = useState({
+    suhu: 0,
+    kelembapan: 0,
+    hari: 1,
+    putaran: 0,
+    status_lampu: 0,
+    status_motor: 0,
+    jenis_unggas: "ayam",
+    suhu_min: 37.0,
+    suhu_max: 38.0,
   });
-  const [jenisUnggas, setJenisUnggas] = useState("ayam");
+
+  const [inputSuhu, setInputSuhu] = useState({ min: 37, max: 38 });
   const [logs, setLogs] = useState([]);
+  const [isClient, setIsClient] = useState(false);
+  
+  // Status Koneksi (Heartbeat)
+  const [isConnected, setIsConnected] = useState(false);
+  const lastSyncRef = useRef(Date.now());
 
-  // Referensi Target Berdasarkan Unggas
-  const infoUnggas = {
-    ayam: { nama: "Telur Ayam", hari: 21, stopPutar: 18 },
-    bebek: { nama: "Telur Bebek", hari: 28, stopPutar: 25 },
-    entok: { nama: "Telur Entok", hari: 35, stopPutar: 32 },
-    angsa: { nama: "Telur Angsa", hari: 30, stopPutar: 27 },
-  };
-
+  // --- USE EFFECT (LISTEN DATA & HEARTBEAT) ---
   useEffect(() => {
-    // Tarik Data Real-time & Jenis Unggas
-    const unsubData = onValue(ref(database, "inkubator"), (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        setDataTetas({
-          suhu: data.suhu || 0, kelembapan: data.kelembapan || 0,
-          hari: data.hari || 0, putaran: data.putaran || 0,
-          status_lampu: data.status_lampu || 0, status_motor: data.status_motor || 0,
+    setIsClient(true);
+    const inkubatorRef = ref(db, "inkubator");
+    
+    // Listener Data Firebase
+    onValue(inkubatorRef, (snapshot) => {
+      const val = snapshot.val();
+      if (val) {
+        lastSyncRef.current = Date.now();
+        setIsConnected(true);
+
+        const pengaturan = val.pengaturan || {};
+        
+        setData({
+          suhu: val.suhu || 0,
+          kelembapan: val.kelembapan || 0,
+          hari: val.hari || 1,
+          putaran: val.putaran || 0,
+          status_lampu: val.status_lampu || 0,
+          status_motor: val.status_motor || 0,
+          jenis_unggas: pengaturan.jenis_unggas || "ayam",
+          suhu_min: pengaturan.suhu_min || 37.0,
+          suhu_max: pengaturan.suhu_max || 38.0,
         });
-        if (data.pengaturan && data.pengaturan.jenis_unggas) {
-          setJenisUnggas(data.pengaturan.jenis_unggas);
+
+        // Set input form suhu jika belum pernah diubah
+        setInputSuhu((prev) => ({
+          min: prev.min === 37 ? (pengaturan.suhu_min || 37) : prev.min,
+          max: prev.max === 38 ? (pengaturan.suhu_max || 38) : prev.max,
+        }));
+
+        if (val.log) {
+          const logArray = Object.values(val.log);
+          setLogs(logArray);
         }
       }
     });
 
-    // Tarik Riwayat Laporan Harian
-    const unsubLog = onValue(query(ref(database, "inkubator/log"), limitToLast(60)), (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        const parsedLogs = Object.keys(data).map((key) => {
-          const raw = data[key];
-          const match = raw.match(/\[(.*?)\] Hari:(\d+) \| S:(.*?)C \| RH:(.*?)% \| Putar Ke-(\d+)/);
-          return match ? { id: key, waktu: match[1], hari: match[2], suhu: match[3], kelembapan: match[4], putaran: match[5] } : null;
-        }).filter(Boolean).reverse();
-        setLogs(parsedLogs);
-      } else {
-        setLogs([]);
+    // Pengecekan Koneksi setiap 5 detik
+    const connectionChecker = setInterval(() => {
+      if (Date.now() - lastSyncRef.current > 20000) {
+        setIsConnected(false); // Dianggap offline jika > 20 detik tidak ada data
       }
-    });
+    }, 5000);
 
-    return () => { unsubData(); unsubLog(); };
+    return () => clearInterval(connectionChecker);
   }, []);
 
-  // Handler Ubah Jenis Telur
-  const handleUbahJenis = (e) => {
-    const pilihan = e.target.value;
-    setJenisUnggas(pilihan);
-    set(ref(database, 'inkubator/pengaturan/jenis_unggas'), pilihan);
+  // --- FUNGSI KENDALI & PENGATURAN ---
+  const handleResetSiklus = () => {
+    const konfirmasi = confirm("Yakin ingin mengulang siklus? Hari akan kembali ke 1 dan putaran ke 0.");
+    if (konfirmasi) {
+      set(ref(db, "inkubator/hari"), 1);
+      set(ref(db, "inkubator/putaran"), 0);
+      set(ref(db, "inkubator/kendali_manual/reset_hari"), 1); // Perintah ke NodeMCU
+      alert("Siklus berhasil direset!");
+    }
   };
 
-  const handlePutarManual = () => {
-    set(ref(database, 'inkubator/kendali_manual/motor'), 1);
-    alert("Sinyal putar manual dikirim ke mesin tetas!");
-    setTimeout(() => set(ref(database, 'inkubator/kendali_manual/motor'), 0), 6000);
+  const handleUbahHari = (tambah) => {
+    const hariBaru = tambah ? data.hari + 1 : (data.hari > 1 ? data.hari - 1 : 1);
+    set(ref(db, "inkubator/hari"), hariBaru);
   };
 
-  // Ekspor CSV Laporan Harian
-  const exportToCSV = () => {
-    if (logs.length === 0) return alert("Belum ada data riwayat laporan harian!");
+  const handleUbahUnggas = (e) => {
+    const jenisBaru = e.target.value;
+    const konfirmasi = confirm(`Ganti ke telur ${jenisBaru.toUpperCase()}? Ini akan mereset hitungan hari dan putaran ke awal.`);
+    if (konfirmasi) {
+      set(ref(db, "inkubator/pengaturan/jenis_unggas"), jenisBaru);
+      set(ref(db, "inkubator/hari"), 1);
+      set(ref(db, "inkubator/putaran"), 0);
+    }
+  };
+
+  const handleSimpanSuhu = () => {
+    if (parseFloat(inputSuhu.min) >= parseFloat(inputSuhu.max)) {
+      alert("Suhu Minimal tidak boleh lebih besar atau sama dengan Suhu Maksimal!");
+      return;
+    }
+    set(ref(db, "inkubator/pengaturan/suhu_min"), parseFloat(inputSuhu.min));
+    set(ref(db, "inkubator/pengaturan/suhu_max"), parseFloat(inputSuhu.max));
+    alert("Pengaturan termostat berhasil disimpan ke alat!");
+  };
+
+  // --- FUNGSI EXPORT CSV YANG SUDAH DIRAPIKAN ---
+  const unduhLaporanCSV = () => {
+    if (logs.length === 0) {
+      alert("Belum ada data laporan yang tersimpan.");
+      return;
+    }
     
-    let csvContent = "\uFEFFWaktu Pencatatan,Hari Inkubasi,Suhu Udara (C),Kelembapan (%),Total Putaran\n";
-    logs.forEach(log => { csvContent += `"${log.waktu}","Hari Ke-${log.hari}","${log.suhu}","${log.kelembapan}","${log.putaran}"\n`; });
-
+    let csvContent = "Waktu Pencatatan;Hari Ke-;Suhu Udara (C);Kelembapan (%);Total Putaran\n";
+    
+    logs.forEach((logString) => {
+      try {
+        let parts = logString.split("|");
+        let waktuMentah = parts[0].trim(); 
+        
+        let waktu = waktuMentah.substring(waktuMentah.indexOf('[') + 1, waktuMentah.indexOf(']')); 
+        let hari = waktuMentah.split("Hari:")[1].trim(); 
+        
+        let suhu = parts[1].replace("S:", "").replace("C", "").trim(); 
+        let rh = parts[2].replace("RH:", "").replace("%", "").trim(); 
+        let putar = parts[3].replace("Putar Ke-", "").trim(); 
+        
+        csvContent += `${waktu};${hari};${suhu};${rh};${putar}\n`;
+      } catch (error) {
+        // Jika ada baris error, abaikan
+      }
+    });
+    
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.setAttribute("download", `Laporan_Harian_Inkubator_${new Date().toISOString().slice(0, 10)}.csv`);
+    link.href = url;
+    link.setAttribute("download", `Laporan_Inkubator_${data.jenis_unggas}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
+  // --- PARSING DATA UNTUK GRAFIK & TABEL UI ---
+  const parsedChartData = logs.map((logString) => {
+    try {
+      let parts = logString.split("|");
+      let waktuMentah = parts[0].trim();
+      
+      let waktu = waktuMentah.substring(waktuMentah.indexOf('[') + 1, waktuMentah.indexOf(']')); 
+      let hari = waktuMentah.split("Hari:")[1].trim(); 
+      
+      let suhu = parseFloat(parts[1].replace("S:", "").replace("C", "").trim()); 
+      let kelembapan = parseFloat(parts[2].replace("RH:", "").replace("%", "").trim()); 
+      let putaran = parts[3].replace("Putar Ke-", "").trim(); 
+      
+      // Filter data 'nan' atau 0.0 (jika sensor sempat error saat merekam)
+      if (isNaN(suhu) || isNaN(kelembapan) || suhu === 0) return null;
+      
+      return { waktu, hari, suhu, kelembapan, putaran };
+    } catch (error) {
+      return null;
+    }
+  }).filter(item => item !== null);
+
+  if (!isClient) return null;
+
   return (
-    <main className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-800">
-      <div className="max-w-6xl mx-auto space-y-6">
+    <div className="min-h-screen bg-gray-50 p-4 md:p-8 text-gray-800 font-sans pb-20">
+      <div className="max-w-5xl mx-auto space-y-6">
         
-        {/* HEADER */}
-        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col md:flex-row justify-between items-center gap-4">
-          <div>
-            <h1 className="text-2xl md:text-3xl font-black text-slate-800 tracking-tight">Smart Incubator Dashboard</h1>
-            <p className="text-slate-500 font-medium text-sm mt-1">Sistem Pemantauan Suhu & Kendali Otomatis Berbasis IoT</p>
+        {/* HEADER & STATUS KONEKSI */}
+        <div className="flex justify-center mb-8">
+          {isConnected ? (
+            <span className="bg-green-100 text-green-700 font-bold px-6 py-2 rounded-full shadow-sm text-sm tracking-widest animate-pulse">
+              🟢 LIVE CONNECTED
+            </span>
+          ) : (
+            <span className="bg-red-100 text-red-700 font-bold px-6 py-2 rounded-full shadow-sm text-sm tracking-widest">
+              🔴 OFFLINE / DISCONNECTED
+            </span>
+          )}
+        </div>
+
+        {/* KARTU MONITORING UTAMA */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-white p-6 rounded-2xl shadow-sm text-center border border-gray-100">
+            <div className="text-3xl font-black text-red-500 mb-1">{data.suhu.toFixed(1)}<span className="text-lg">°C</span></div>
+            <div className="text-xs font-bold text-gray-400 tracking-wider">SUHU UDARA</div>
           </div>
-          <div className="flex items-center gap-3 bg-emerald-50 px-4 py-2 rounded-full border border-emerald-100">
-            <span className="h-3 w-3 bg-emerald-500 rounded-full animate-ping"></span>
-            <span className="text-xs font-bold text-emerald-600 uppercase tracking-wider">Live Connected</span>
+          <div className="bg-white p-6 rounded-2xl shadow-sm text-center border border-gray-100">
+            <div className="text-3xl font-black text-blue-500 mb-1">{data.kelembapan.toFixed(1)}<span className="text-lg">%</span></div>
+            <div className="text-xs font-bold text-gray-400 tracking-wider">KELEMBAPAN</div>
+          </div>
+          <div className="bg-white p-6 rounded-2xl shadow-sm text-center border border-gray-100 relative group">
+            <div className="text-3xl font-black text-green-500 mb-1">{data.hari}</div>
+            <div className="text-xs font-bold text-gray-400 tracking-wider">HARI INKUBASI</div>
+            <div className="absolute inset-x-0 bottom-1 flex justify-center space-x-2 opacity-0 group-hover:opacity-100 transition-opacity">
+               <button onClick={() => handleUbahHari(false)} className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 rounded font-bold">-</button>
+               <button onClick={() => handleUbahHari(true)} className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-2 rounded font-bold">+</button>
+            </div>
+          </div>
+          <div className="bg-white p-6 rounded-2xl shadow-sm text-center border border-gray-100">
+            <div className="text-3xl font-black text-yellow-500 mb-1">{data.putaran}x</div>
+            <div className="text-xs font-bold text-gray-400 tracking-wider">TOTAL PUTARAN</div>
           </div>
         </div>
 
-        {/* BAGIAN ATAS: INDIKATOR DAN KONTROL */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          {/* Panel Kiri: 4 Metrik Utama (Desain Seragam) */}
-          <div className="lg:col-span-2 grid grid-cols-2 sm:grid-cols-4 gap-4">
-            
-            <CircularGauge value={dataTetas.suhu} min={20} max={50} label="Suhu Udara" color="#ef4444" unit="°C" />
-            <CircularGauge value={dataTetas.kelembapan} min={0} max={100} label="Kelembapan" color="#3b82f6" unit="%" />
-            
-            {/* Kotak Hari Inkubasi (Diseragamkan) */}
-            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col items-center justify-center text-center">
-              <div className="flex items-center justify-center w-24 h-24 rounded-full bg-emerald-50 border-4 border-emerald-100 mb-3">
-                <span className="text-4xl font-black text-emerald-600">{dataTetas.hari}</span>
-              </div>
-              <p className="text-xs font-bold text-slate-600 uppercase tracking-wider">Hari Inkubasi</p>
-              <span className="mt-2 text-[10px] font-bold bg-emerald-50 text-emerald-600 border border-emerald-200 px-2 py-1 rounded-md">Target: {infoUnggas[jenisUnggas].hari} Hari</span>
-            </div>
-            
-            {/* Kotak Putaran (Diseragamkan) */}
-            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 flex flex-col items-center justify-center text-center">
-              <div className="flex items-center justify-center w-24 h-24 rounded-full bg-amber-50 border-4 border-amber-100 mb-3">
-                <span className="text-4xl font-black text-amber-500">{dataTetas.putaran}x</span>
-              </div>
-              <p className="text-xs font-bold text-slate-600 uppercase tracking-wider">Total Putaran</p>
-              <span className="mt-2 text-[10px] font-bold bg-amber-50 text-amber-600 border border-amber-200 px-2 py-1 rounded-md">Stop H-{infoUnggas[jenisUnggas].stopPutar}</span>
-            </div>
-
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* PROFIL UNGGAS */}
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+            <h2 className="text-sm font-bold text-gray-500 mb-4 flex items-center">
+              <span className="mr-2">🥚</span> PROFIL & SIKLUS
+            </h2>
+            <select 
+              value={data.jenis_unggas} 
+              onChange={handleUbahUnggas}
+              className="w-full p-3 mb-4 border border-gray-200 rounded-xl bg-gray-50 font-medium focus:ring-2 focus:ring-blue-400 outline-none"
+            >
+              <option value="ayam">Telur Ayam (21 Hari)</option>
+              <option value="bebek">Telur Bebek/Itik (28 Hari)</option>
+              <option value="entok">Telur Entok (35 Hari)</option>
+              <option value="angsa">Telur Angsa (30 Hari)</option>
+            </select>
+            <button 
+              onClick={handleResetSiklus}
+              className="w-full px-4 py-3 rounded-xl font-bold text-sm text-white bg-red-500 hover:bg-red-600 transition-all shadow-md"
+            >
+              RESET SIKLUS (MULAI HARI 1)
+            </button>
           </div>
 
-          {/* Panel Kanan: Setting Jenis & Kendali */}
-          <div className="space-y-4">
-            
-            {/* Profil Inkubator */}
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-              <h3 className="font-bold uppercase tracking-wider text-slate-500 text-xs mb-3 flex items-center gap-2">
-                <svg className="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-                Profil Inkubator
-              </h3>
-              <div className="flex flex-col gap-2">
-                <label className="text-sm font-bold text-slate-700">Pilih Jenis Telur:</label>
-                <select 
-                  value={jenisUnggas} 
-                  onChange={handleUbahJenis}
-                  className="bg-slate-50 border border-slate-200 text-slate-800 text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full p-2.5 font-semibold transition-colors"
-                >
-                  <option value="ayam">Telur Ayam (21 Hari)</option>
-                  <option value="bebek">Telur Bebek Peking (28 Hari)</option>
-                  <option value="entok">Telur Entok (35 Hari)</option>
-                  <option value="angsa">Telur Angsa/Soang (30 Hari)</option>
-                </select>
+          {/* PENGATURAN SUHU TERMOSTAT */}
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+            <h2 className="text-sm font-bold text-gray-500 mb-4 flex items-center">
+              <span className="mr-2">🌡️</span> PENGATURAN TERMOSTAT
+            </h2>
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Suhu Min (Nyala)</label>
+                <input 
+                  type="number" step="0.1" value={inputSuhu.min}
+                  onChange={(e) => setInputSuhu({...inputSuhu, min: e.target.value})}
+                  className="w-full p-2 border border-gray-200 rounded-lg bg-gray-50 text-center font-bold"
+                />
               </div>
-            </div>
-
-            {/* Kendali Aktuator (Desain Putih Konsisten) */}
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col justify-between">
-              <h3 className="font-bold uppercase tracking-wider text-slate-500 text-xs mb-3 flex items-center gap-2">
-                <svg className="w-4 h-4 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                Kendali Aktuator Mesin
-              </h3>
-              <div className="space-y-3">
-                <div className="flex justify-between items-center bg-slate-50 border border-slate-100 p-3 rounded-xl">
-                  <div>
-                    <p className="text-sm font-bold text-slate-800">Lampu Pemanas</p>
-                    <p className="text-[10px] font-medium text-slate-500">Otomatis Terpusat</p>
-                  </div>
-                  <span className={`px-3 py-1 rounded-full text-xs font-black ${dataTetas.status_lampu === 1 ? 'bg-rose-500 text-white shadow-md shadow-rose-200' : 'bg-slate-200 text-slate-500'}`}>
-                    {dataTetas.status_lampu === 1 ? 'ON' : 'OFF'}
-                  </span>
-                </div>
-                
-                <div className="flex justify-between items-center bg-slate-50 border border-slate-100 p-3 rounded-xl">
-                  <div>
-                    <p className="text-sm font-bold text-slate-800">Motor Rak Geser</p>
-                    <p className="text-[10px] font-medium text-slate-500">Pembalik Telur</p>
-                  </div>
-                  <button 
-                    onClick={handlePutarManual}
-                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-indigo-200"
-                  >
-                    PUTAR MANUAL
-                  </button>
-                </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Suhu Max (Mati)</label>
+                <input 
+                  type="number" step="0.1" value={inputSuhu.max}
+                  onChange={(e) => setInputSuhu({...inputSuhu, max: e.target.value})}
+                  className="w-full p-2 border border-gray-200 rounded-lg bg-gray-50 text-center font-bold"
+                />
               </div>
-            </div>
-            
-          </div>
-        </div>
-
-        {/* BAGIAN BAWAH: TABEL LAPORAN HARIAN */}
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="bg-slate-50 px-6 py-5 border-b border-slate-200 flex flex-col sm:flex-row justify-between items-center gap-4">
-            <div>
-              <h3 className="font-bold text-slate-800 uppercase tracking-wide text-sm flex items-center gap-2">
-                <svg className="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                Laporan Harian (Otomatis)
-              </h3>
-              <p className="text-xs text-slate-500 mt-1">Jadwal pencatatan sensor: <b>07:00 Pagi</b> | <b>13:00 Siang</b> | <b>19:00 Malam</b></p>
             </div>
             <button 
-              onClick={exportToCSV}
-              className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-bold rounded-xl shadow-md shadow-indigo-200 transition-all text-xs flex items-center gap-2"
+              onClick={handleSimpanSuhu}
+              className="w-full px-4 py-3 rounded-xl font-bold text-sm text-white bg-blue-500 hover:bg-blue-600 transition-all shadow-md"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-              Export CSV / Excel
+              SIMPAN PENGATURAN SUHU
+            </button>
+          </div>
+        </div>
+
+        {/* KENDALI AKTUATOR */}
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col md:flex-row justify-between items-center space-y-4 md:space-y-0">
+          <div className="flex space-x-6">
+            <div className="flex items-center space-x-3">
+              <div className="text-sm font-bold text-gray-500">LAMPU PEMANAS:</div>
+              {data.status_lampu === 1 ? (
+                <span className="bg-red-500 text-white px-3 py-1 rounded-full font-bold text-xs">ON</span>
+              ) : (
+                <span className="bg-gray-300 text-gray-600 px-3 py-1 rounded-full font-bold text-xs">OFF</span>
+              )}
+            </div>
+            <div className="flex items-center space-x-3">
+              <div className="text-sm font-bold text-gray-500">MOTOR RAK:</div>
+              {data.status_motor === 1 ? (
+                <span className="bg-blue-500 text-white px-3 py-1 rounded-full font-bold text-xs">BERPUTAR</span>
+              ) : (
+                <span className="bg-gray-300 text-gray-600 px-3 py-1 rounded-full font-bold text-xs">DIAM</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* GRAFIK DATA TERPISAH */}
+        <div className="grid grid-cols-1 gap-6">
+          {/* GRAFIK SUHU */}
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+            <h2 className="text-sm font-bold text-gray-500 mb-6 flex items-center">
+              <span className="mr-2">📈</span> GRAFIK SUHU UDARA (°C) - RIWAYAT PENUH
+            </h2>
+            {parsedChartData.length > 0 ? (
+              <div className="h-72 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={parsedChartData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                    <XAxis dataKey="waktu" textAnchor="end" tick={{fontSize: 10}} minTickGap={30} />
+                    <YAxis domain={['dataMin - 1', 'dataMax + 1']} tick={{fontSize: 12}} />
+                    <Tooltip />
+                    <Legend />
+                    <Line 
+                      type="monotone" 
+                      dataKey="suhu" 
+                      name="Suhu (°C)" 
+                      stroke="#ef4444" 
+                      strokeWidth={2} 
+                      dot={parsedChartData.length > 20 ? false : { r: 3 }} 
+                      activeDot={{ r: 6 }} 
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div className="text-center text-gray-400 py-10 text-sm font-medium">
+                Belum ada data grafik suhu yang terekam.
+              </div>
+            )}
+          </div>
+
+          {/* GRAFIK KELEMBAPAN */}
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+            <h2 className="text-sm font-bold text-gray-500 mb-6 flex items-center">
+              <span className="mr-2">💧</span> GRAFIK KELEMBAPAN (%) - RIWAYAT PENUH
+            </h2>
+            {parsedChartData.length > 0 ? (
+              <div className="h-72 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={parsedChartData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                    <XAxis dataKey="waktu" textAnchor="end" tick={{fontSize: 10}} minTickGap={30} />
+                    <YAxis domain={['dataMin - 5', 'dataMax + 5']} tick={{fontSize: 12}} />
+                    <Tooltip />
+                    <Legend />
+                    <Line 
+                      type="monotone" 
+                      dataKey="kelembapan" 
+                      name="Kelembapan (%)" 
+                      stroke="#3b82f6" 
+                      strokeWidth={2} 
+                      dot={parsedChartData.length > 20 ? false : { r: 3 }} 
+                      activeDot={{ r: 6 }} 
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div className="text-center text-gray-400 py-10 text-sm font-medium">
+                Belum ada data grafik kelembapan yang terekam.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* TABEL RIWAYAT LOG */}
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-sm font-bold text-gray-500 flex items-center">
+              <span className="mr-2">📋</span> LAPORAN HARIAN (LOGS)
+            </h2>
+            <button 
+              onClick={unduhLaporanCSV}
+              className="px-4 py-2 rounded-lg font-bold text-xs text-white bg-green-600 hover:bg-green-700 shadow-sm transition-all"
+            >
+              UNDUH EXCEL (CSV)
             </button>
           </div>
           
-          <div className="overflow-x-auto max-h-72">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-white sticky top-0 shadow-sm border-b border-slate-100">
-                <tr className="text-slate-500 text-xs uppercase tracking-wider">
-                  <th className="py-4 px-6 font-semibold">Waktu Pencatatan</th>
-                  <th className="py-4 px-6 font-semibold">Hari Inkubasi</th>
-                  <th className="py-4 px-6 font-semibold">Suhu Udara</th>
-                  <th className="py-4 px-6 font-semibold">Kelembapan</th>
-                  <th className="py-4 px-6 font-semibold">Total Putaran</th>
+          <div className="overflow-x-auto max-h-80 overflow-y-auto border border-gray-100 rounded-xl">
+            <table className="w-full text-sm text-left text-gray-500">
+              <thead className="text-xs text-gray-700 uppercase bg-gray-50 sticky top-0 shadow-sm z-10">
+                <tr>
+                  <th scope="col" className="px-6 py-3">Waktu</th>
+                  <th scope="col" className="px-6 py-3">Hari Ke-</th>
+                  <th scope="col" className="px-6 py-3">Suhu</th>
+                  <th scope="col" className="px-6 py-3">Kelembapan</th>
+                  <th scope="col" className="px-6 py-3">Putaran</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100 text-slate-700">
-                {logs.length > 0 ? (
-                  logs.map((log) => (
-                    <tr key={log.id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="py-3 px-6 font-bold text-slate-800">Jam {log.waktu}</td>
-                      <td className="py-3 px-6">Hari Ke-{log.hari}</td>
-                      <td className="py-3 px-6 font-bold text-rose-500">{log.suhu} °C</td>
-                      <td className="py-3 px-6 font-bold text-sky-500">{log.kelembapan} %</td>
-                      <td className="py-3 px-6"><span className="px-2.5 py-1 bg-slate-100 text-slate-600 border border-slate-200 rounded-lg font-bold text-xs">Ke-{log.putaran}</span></td>
+              <tbody>
+                {parsedChartData.length > 0 ? (
+                  parsedChartData.slice().reverse().map((log, index) => (
+                    <tr key={index} className="bg-white border-b hover:bg-gray-50 transition-colors">
+                      <td className="px-6 py-4 font-medium text-gray-900 whitespace-nowrap">{log.waktu}</td>
+                      <td className="px-6 py-4">{log.hari}</td>
+                      <td className="px-6 py-4 text-red-500 font-bold">{log.suhu}°C</td>
+                      <td className="px-6 py-4 text-blue-500 font-bold">{log.kelembapan}%</td>
+                      <td className="px-6 py-4">{log.putaran}</td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan="5" className="py-10 text-center text-slate-400 italic">
-                      Belum ada laporan harian. Data akan otomatis masuk pada pukul 07:00, 13:00, dan 19:00.
+                    <td colSpan="5" className="px-6 py-8 text-center text-gray-400 font-medium">
+                      Data laporan masih kosong.
                     </td>
                   </tr>
                 )}
@@ -265,6 +417,6 @@ export default function DashboardPintar() {
         </div>
 
       </div>
-    </main>
+    </div>
   );
 }
